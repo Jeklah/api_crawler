@@ -107,10 +107,11 @@ fn serialize_hierarchical_result(result: &CrawlResult, config: &OutputConfig) ->
     for endpoint in &result.endpoints {
         let parent_key = endpoint.parent_url.as_deref().unwrap_or(&result.start_url);
 
-        // Create endpoint object
+        // Create endpoint object - only include non-null/non-empty fields
         let mut endpoint_obj = Map::new();
         endpoint_obj.insert("href".to_string(), Value::String(endpoint.href.clone()));
 
+        // Only include optional fields if they have values
         if let Some(ref rel) = endpoint.rel {
             endpoint_obj.insert("rel".to_string(), Value::String(rel.clone()));
         }
@@ -126,6 +127,7 @@ fn serialize_hierarchical_result(result: &CrawlResult, config: &OutputConfig) ->
 
         endpoint_obj.insert("depth".to_string(), Value::Number(endpoint.depth.into()));
 
+        // Only include metadata if it's not empty
         if !endpoint.metadata.is_empty() {
             endpoint_obj.insert("metadata".to_string(), json!(endpoint.metadata));
         }
@@ -513,5 +515,86 @@ mod tests {
         assert!(json.contains("http://example.com/users"));
         assert!(json.contains("http://example.com/posts"));
         assert!(json.contains("summary"));
+    }
+
+    #[test]
+    fn test_clean_output_omits_null_fields() {
+        let mut result =
+            CrawlResult::new("http://example.com".to_string(), &CrawlerConfig::default());
+
+        // Create endpoint with only some fields populated
+        let endpoint = ApiEndpoint::new("http://example.com/test".to_string(), 1)
+            .with_rel(Some("test".to_string()))
+            .with_parent(Some("http://example.com".to_string()));
+        // Note: method, type, title remain None, metadata remains empty
+
+        result.endpoints.push(endpoint);
+
+        let config = OutputConfig {
+            format: OutputFormat::PrettyJson,
+            include_stats: true,
+            include_config: false,
+            hierarchical: false,
+        };
+
+        let json = serialize_result(&result, &config).unwrap();
+
+        // Should include fields with values
+        assert!(json.contains("href"));
+        assert!(json.contains("rel"));
+        assert!(json.contains("depth"));
+        assert!(json.contains("parent_url"));
+
+        // Should NOT include null/empty fields
+        assert!(!json.contains("method"));
+        assert!(!json.contains("type"));
+        assert!(!json.contains("title"));
+        assert!(!json.contains("metadata"));
+        assert!(!json.contains("config_snapshot"));
+
+        // Stats with zero values should be omitted
+        assert!(!json.contains("urls_processed"));
+        assert!(!json.contains("successful_requests"));
+        assert!(!json.contains("failed_requests"));
+        assert!(!json.contains("urls_skipped"));
+        assert!(!json.contains("max_depth_reached"));
+        assert!(!json.contains("total_time_ms"));
+        assert!(!json.contains("errors"));
+    }
+
+    #[test]
+    fn test_hierarchical_output_omits_null_fields() {
+        let mut result =
+            CrawlResult::new("http://example.com".to_string(), &CrawlerConfig::default());
+
+        // Create endpoint with only some fields populated
+        let endpoint = ApiEndpoint::new("http://example.com/test".to_string(), 1)
+            .with_rel(Some("test".to_string()))
+            .with_parent(Some("http://example.com".to_string()));
+        // Note: method, type, title remain None, metadata remains empty
+
+        result.endpoints.push(endpoint);
+
+        let config = OutputConfig {
+            format: OutputFormat::Hierarchical,
+            include_stats: false,
+            include_config: false,
+            hierarchical: true,
+        };
+
+        let json = serialize_result(&result, &config).unwrap();
+
+        // Should include fields with values
+        assert!(json.contains("href"));
+        assert!(json.contains("rel"));
+        assert!(json.contains("depth"));
+
+        // Should NOT include null/empty fields in hierarchical format
+        assert!(!json.contains("method"));
+        assert!(!json.contains("type"));
+        assert!(!json.contains("title"));
+        assert!(!json.contains("metadata"));
+        assert!(!json.contains("config_snapshot"));
+        assert!(!json.contains("stats"));
     }
 }

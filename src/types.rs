@@ -4,6 +4,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use url::Url;
 
+/// Helper function to check if a HashMap is empty (for serde skip_serializing_if)
+fn is_empty_metadata(metadata: &HashMap<String, serde_json::Value>) -> bool {
+    metadata.is_empty()
+}
+
+/// Helper function to check if a String is empty (for serde skip_serializing_if)
+fn is_empty_string(s: &String) -> bool {
+    s.is_empty()
+}
+
 /// Represents a single API endpoint discovered during crawling
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApiEndpoint {
@@ -11,24 +21,30 @@ pub struct ApiEndpoint {
     pub href: String,
 
     /// The relationship type (e.g., "self", "next", "related")
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rel: Option<String>,
 
     /// HTTP method if specified
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
 
     /// Content type if specified
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
 
     /// Title or description if available
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 
     /// The depth at which this endpoint was discovered
     pub depth: usize,
 
     /// The parent URL that led to discovering this endpoint
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_url: Option<String>,
 
     /// Additional metadata found in the response
+    #[serde(skip_serializing_if = "is_empty_metadata")]
     pub metadata: HashMap<String, serde_json::Value>,
 }
 
@@ -155,28 +171,50 @@ impl CrawlerConfig {
     }
 }
 
+/// Helper function to check if a Vec is empty (for serde skip_serializing_if)
+fn is_empty_errors(errors: &Vec<String>) -> bool {
+    errors.is_empty()
+}
+
+/// Helper function to check if a usize is zero (for serde skip_serializing_if)
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
+/// Helper function to check if a u128 is zero (for serde skip_serializing_if)
+fn is_zero_u128(value: &u128) -> bool {
+    *value == 0
+}
+
 /// Statistics about the crawling process
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CrawlStats {
     /// Total number of URLs processed
+    #[serde(skip_serializing_if = "is_zero_usize")]
     pub urls_processed: usize,
 
     /// Number of successful requests
+    #[serde(skip_serializing_if = "is_zero_usize")]
     pub successful_requests: usize,
 
     /// Number of failed requests
+    #[serde(skip_serializing_if = "is_zero_usize")]
     pub failed_requests: usize,
 
     /// Number of URLs skipped (duplicate or filtered)
+    #[serde(skip_serializing_if = "is_zero_usize")]
     pub urls_skipped: usize,
 
     /// Maximum depth reached
+    #[serde(skip_serializing_if = "is_zero_usize")]
     pub max_depth_reached: usize,
 
     /// Total time taken for crawling
+    #[serde(skip_serializing_if = "is_zero_u128")]
     pub total_time_ms: u128,
 
     /// Errors encountered during crawling
+    #[serde(skip_serializing_if = "is_empty_errors")]
     pub errors: Vec<String>,
 }
 
@@ -202,6 +240,7 @@ pub struct CrawlResult {
     pub completed_at: chrono::DateTime<chrono::Utc>,
 
     /// Configuration used for this crawl
+    #[serde(skip_serializing_if = "is_empty_string")]
     pub config_snapshot: String,
 }
 
