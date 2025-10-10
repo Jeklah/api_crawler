@@ -8,7 +8,7 @@ A powerful Rust-based tool for crawling REST APIs and mapping their complete end
 - 🚀 **High Performance**: Async/await with configurable concurrency limits
 - 🔗 **Multiple Link Formats**: Supports HAL (Hypertext Application Language), JSON API, and custom link formats
 - 🎯 **Smart Filtering**: Excludes "self" relations to prevent infinite loops
-- 📊 **Comprehensive Output**: Detailed JSON mapping with statistics and metadata
+- 📊 **Comprehensive Output**: Clean JSON mapping with statistics and metadata (null fields omitted)
 - 🛡️ **Robust Error Handling**: Graceful handling of failures with detailed error reporting
 - ⚙️ **Highly Configurable**: Customizable depth, concurrency, timeouts, and more
 - 🌐 **Domain Restrictions**: Optionally limit crawling to specific domains
@@ -143,7 +143,7 @@ Crawl an API and display a summary without saving:
 
 ## Output Formats
 
-The crawler supports multiple output formats to suit different use cases:
+The crawler supports multiple output formats to suit different use cases. All formats automatically omit null/empty fields for cleaner, more concise output.
 
 ### Standard Format (Default)
 
@@ -156,9 +156,7 @@ The default format provides a comprehensive flat structure:
     {
       "href": "https://api.example.com/users",
       "rel": "users",
-      "method": null,
       "type": "application/json",
-      "title": null,
       "depth": 1,
       "parent_url": "https://api.example.com",
       "metadata": {
@@ -175,8 +173,7 @@ The default format provides a comprehensive flat structure:
     "failed_requests": 2,
     "urls_skipped": 5,
     "max_depth_reached": 3,
-    "total_time_ms": 2500,
-    "errors": []
+    "total_time_ms": 2500
   },
   "started_at": "2024-01-15T10:29:30Z",
   "completed_at": "2024-01-15T10:30:00Z",
@@ -238,6 +235,7 @@ Use `--hierarchical` or `--format hierarchical` to structure endpoints under the
 - 📊 **Better visualization** - Natural tree structure for API exploration
 - 🔍 **Simplified navigation** - Intuitive browsing of discovered endpoints
 - 📚 **Documentation friendly** - Perfect for generating API documentation
+- 🧹 **Clean output** - Automatically omits null fields (`method`, `type`, `title`) and empty collections
 
 ## Library Usage
 
@@ -359,6 +357,7 @@ async fn main() -> Result<()> {
 5. **Monitor rate limits** and adjust delay accordingly
 6. **Save results to files** for later analysis
 7. **Use verbose mode** for debugging issues
+8. **Use hierarchical format** for cleaner, more structured output
 
 ## Common Issues
 
@@ -400,6 +399,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - Initial release
 - HAL and JSON API support
 - Concurrent crawling
-- Comprehensive output format
+- Hierarchical and standard output formats
+- Clean JSON output (null fields automatically omitted)
 - CLI interface
 - Library interface
