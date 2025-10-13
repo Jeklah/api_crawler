@@ -1,0 +1,19 @@
+{
+  "api_tree": {},
+  "completed_at": "2025-10-13T09:00:59.235935786+00:00",
+  "config_snapshot": "CrawlerConfig { max_depth: 10, max_concurrent_requests: 10, timeout_seconds: 30, max_urls: 1000, user_agent: \"API-Crawler/1.0\", headers: {}, delay_ms: 100, follow_redirects: true, allowed_domains: {} }",
+  "start_url": "http://nonexistent-host:8080/api/v2",
+  "started_at": "2025-10-13T09:00:59.112169611+00:00",
+  "stats": {
+    "errors": [
+      "URL http://nonexistent-host:8080/api/v2: HTTP request failed: error sending request for url (http://nonexistent-host:8080/api/v2): error trying to connect: dns error: failed to lookup address information: Name or service not known"
+    ],
+    "failed_requests": 1,
+    "total_time_ms": 123
+  },
+  "summary": {
+    "discovered_domains": 0,
+    "max_depth": 0,
+    "total_endpoints": 0
+  }
+}

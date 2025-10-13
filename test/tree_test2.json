@@ -1,0 +1,17 @@
+{
+  "api_tree": {},
+  "completed_at": "2025-10-13T09:01:05.736235495+00:00",
+  "config_snapshot": "CrawlerConfig { max_depth: 10, max_concurrent_requests: 10, timeout_seconds: 30, max_urls: 1000, user_agent: \"API-Crawler/1.0\", headers: {}, delay_ms: 100, follow_redirects: true, allowed_domains: {} }",
+  "start_url": "http://httpbin.org/html",
+  "started_at": "2025-10-13T09:01:04.998538566+00:00",
+  "stats": {
+    "successful_requests": 1,
+    "total_time_ms": 737,
+    "urls_processed": 1
+  },
+  "summary": {
+    "discovered_domains": 0,
+    "max_depth": 0,
+    "total_endpoints": 0
+  }
+}
