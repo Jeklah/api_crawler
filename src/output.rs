@@ -16,6 +16,8 @@ pub enum OutputFormat {
     CompactJson,
     /// Hierarchical structure with endpoints nested under parent URLs
     Hierarchical,
+    /// Compact tree structure with all endpoint info in one block
+    Tree,
 }
 
 /// Output configuration
@@ -72,26 +74,29 @@ pub fn save_results_to_file<P: AsRef<Path>>(
 
 /// Serialize crawl results to JSON string
 pub fn serialize_result(result: &CrawlResult, config: &OutputConfig) -> Result<String> {
-    if config.hierarchical || matches!(config.format, OutputFormat::Hierarchical) {
-        serialize_hierarchical_result(result, config)
-    } else {
-        let mut result_copy = result.clone();
+    match config.format {
+        OutputFormat::Tree => serialize_tree_result(result, config),
+        OutputFormat::Hierarchical => serialize_hierarchical_result(result, config),
+        _ if config.hierarchical => serialize_hierarchical_result(result, config),
+        OutputFormat::PrettyJson | OutputFormat::CompactJson => {
+            let mut result_copy = result.clone();
 
-        // Filter out unwanted fields based on config
-        if !config.include_stats {
-            result_copy.stats = Default::default();
-        }
-
-        if !config.include_config {
-            result_copy.config_snapshot = String::new();
-        }
-
-        match config.format {
-            OutputFormat::PrettyJson | OutputFormat::Hierarchical => {
-                serde_json::to_string_pretty(&result_copy).map_err(CrawlerError::from)
+            // Filter out unwanted fields based on config
+            if !config.include_stats {
+                result_copy.stats = Default::default();
             }
-            OutputFormat::CompactJson => {
-                serde_json::to_string(&result_copy).map_err(CrawlerError::from)
+
+            if !config.include_config {
+                result_copy.config_snapshot = String::new();
+            }
+
+            match config.format {
+                OutputFormat::PrettyJson | OutputFormat::Hierarchical | OutputFormat::Tree => {
+                    serde_json::to_string_pretty(&result_copy).map_err(CrawlerError::from)
+                }
+                OutputFormat::CompactJson => {
+                    serde_json::to_string(&result_copy).map_err(CrawlerError::from)
+                }
             }
         }
     }
@@ -193,8 +198,249 @@ fn serialize_hierarchical_result(result: &CrawlResult, config: &OutputConfig) ->
     let json_value = Value::Object(output);
     match config.format {
         OutputFormat::CompactJson => serde_json::to_string(&json_value).map_err(CrawlerError::from),
-        OutputFormat::PrettyJson | OutputFormat::Hierarchical => {
+        OutputFormat::PrettyJson | OutputFormat::Hierarchical | OutputFormat::Tree => {
             serde_json::to_string_pretty(&json_value).map_err(CrawlerError::from)
+        }
+    }
+}
+
+/// Serialize crawl results in compact tree format
+fn serialize_tree_result(result: &CrawlResult, config: &OutputConfig) -> Result<String> {
+    use crate::types::ApiEndpoint;
+    use serde_json::{Map, Value, json};
+    use std::collections::HashSet;
+
+    // Safety check for empty results
+    if result.endpoints.is_empty() {
+        let mut output = Map::new();
+        output.insert(
+            "start_url".to_string(),
+            Value::String(result.start_url.clone()),
+        );
+        output.insert("api_tree".to_string(), Value::Object(Map::new()));
+
+        let mut summary = Map::new();
+        summary.insert("total_endpoints".to_string(), Value::Number(0.into()));
+        summary.insert("max_depth".to_string(), Value::Number(0.into()));
+        summary.insert("discovered_domains".to_string(), Value::Number(0.into()));
+        output.insert("summary".to_string(), Value::Object(summary));
+
+        if config.include_stats {
+            output.insert("stats".to_string(), json!(result.stats));
+        }
+
+        output.insert(
+            "started_at".to_string(),
+            Value::String(result.started_at.to_rfc3339()),
+        );
+        output.insert(
+            "completed_at".to_string(),
+            Value::String(result.completed_at.to_rfc3339()),
+        );
+
+        if config.include_config {
+            output.insert(
+                "config_snapshot".to_string(),
+                Value::String(result.config_snapshot.clone()),
+            );
+        }
+
+        let json_value = Value::Object(output);
+        return serde_json::to_string_pretty(&json_value).map_err(CrawlerError::from);
+    }
+
+    // Build tree structure with cycle detection
+    let mut final_tree = Map::new();
+
+    // Build a simple non-recursive node structure to avoid infinite nesting
+    fn build_simple_node(endpoint: &ApiEndpoint) -> Map<String, Value> {
+        let mut node = Map::new();
+        node.insert("href".to_string(), Value::String(endpoint.href.clone()));
+
+        if let Some(ref rel) = endpoint.rel {
+            node.insert("rel".to_string(), Value::String(rel.clone()));
+        }
+        if let Some(ref method) = endpoint.method {
+            node.insert("method".to_string(), Value::String(method.clone()));
+        }
+        if let Some(ref content_type) = endpoint.r#type {
+            node.insert("type".to_string(), Value::String(content_type.clone()));
+        }
+        if let Some(ref title) = endpoint.title {
+            node.insert("title".to_string(), Value::String(title.clone()));
+        }
+
+        node.insert("depth".to_string(), Value::Number(endpoint.depth.into()));
+
+        if !endpoint.metadata.is_empty() {
+            node.insert("metadata".to_string(), json!(endpoint.metadata));
+        }
+
+        node
+    }
+
+    // Build tree structure level by level to avoid recursion issues
+    fn build_tree_level(
+        parent_url: &str,
+        all_endpoints: &[ApiEndpoint],
+        processed: &mut HashSet<String>,
+        current_depth: usize,
+        max_depth: usize,
+    ) -> Vec<Value> {
+        if current_depth >= max_depth {
+            return Vec::new();
+        }
+
+        let mut children = Vec::new();
+
+        for endpoint in all_endpoints {
+            // Skip if already processed
+            if processed.contains(&endpoint.href) {
+                continue;
+            }
+
+            // Check if this endpoint is a direct child of the parent
+            if let Some(endpoint_parent) = &endpoint.parent_url {
+                if endpoint_parent == parent_url && endpoint.depth == current_depth {
+                    processed.insert(endpoint.href.clone());
+
+                    let mut node = build_simple_node(endpoint);
+
+                    // Get children for this node
+                    let grandchildren = build_tree_level(
+                        &endpoint.href,
+                        all_endpoints,
+                        processed,
+                        current_depth + 1,
+                        max_depth,
+                    );
+
+                    if !grandchildren.is_empty() {
+                        node.insert("children".to_string(), Value::Array(grandchildren));
+                    }
+
+                    children.push(Value::Object(node));
+                }
+            }
+        }
+
+        children
+    }
+
+    // Calculate reasonable max depth to prevent runaway recursion
+    let max_endpoint_depth = result.endpoints.iter().map(|e| e.depth).max().unwrap_or(0);
+    let max_depth = std::cmp::min(max_endpoint_depth + 10, 100); // Cap at reasonable limit
+
+    // Additional safety check for malformed data
+    if result.endpoints.len() > 10000 {
+        tracing::warn!(
+            "Large number of endpoints ({}), this may take a while",
+            result.endpoints.len()
+        );
+    }
+
+    // Create root node with its children using level-by-level approach
+    let mut processed = HashSet::new();
+    let root_children = build_tree_level(
+        &result.start_url,
+        &result.endpoints,
+        &mut processed,
+        1,
+        max_depth,
+    );
+
+    if !root_children.is_empty() {
+        let mut root_node = Map::new();
+        root_node.insert("href".to_string(), Value::String(result.start_url.clone()));
+        root_node.insert("rel".to_string(), Value::String("root".to_string()));
+        root_node.insert("depth".to_string(), Value::Number(0.into()));
+        root_node.insert("children".to_string(), Value::Array(root_children));
+        final_tree.insert(result.start_url.clone(), Value::Object(root_node));
+    }
+
+    // Add any orphaned endpoints that weren't processed
+    for endpoint in &result.endpoints {
+        if processed.contains(&endpoint.href) {
+            continue;
+        }
+
+        // Check if this is truly an orphaned endpoint (no valid parent)
+        let has_valid_parent = endpoint.parent_url.as_ref().map_or(false, |parent| {
+            result.endpoints.iter().any(|e| &e.href == parent)
+        });
+
+        if !has_valid_parent && !endpoint.href.is_empty() {
+            let node = build_simple_node(endpoint);
+            final_tree.insert(endpoint.href.clone(), Value::Object(node));
+        }
+    }
+
+    // Build final output structure
+    let mut output = Map::new();
+    output.insert(
+        "start_url".to_string(),
+        Value::String(result.start_url.clone()),
+    );
+    output.insert("api_tree".to_string(), Value::Object(final_tree));
+
+    // Add summary
+    let mut summary = Map::new();
+    summary.insert(
+        "total_endpoints".to_string(),
+        Value::Number(result.endpoints.len().into()),
+    );
+    summary.insert(
+        "max_depth".to_string(),
+        Value::Number(
+            result
+                .endpoints
+                .iter()
+                .map(|e| e.depth)
+                .max()
+                .unwrap_or(0)
+                .into(),
+        ),
+    );
+    summary.insert(
+        "discovered_domains".to_string(),
+        Value::Number(result.discovered_domains().len().into()),
+    );
+    output.insert("summary".to_string(), Value::Object(summary));
+
+    if config.include_stats {
+        output.insert("stats".to_string(), json!(result.stats));
+    }
+
+    output.insert(
+        "started_at".to_string(),
+        Value::String(result.started_at.to_rfc3339()),
+    );
+    output.insert(
+        "completed_at".to_string(),
+        Value::String(result.completed_at.to_rfc3339()),
+    );
+
+    if config.include_config {
+        output.insert(
+            "config_snapshot".to_string(),
+            Value::String(result.config_snapshot.clone()),
+        );
+    }
+
+    let json_value = Value::Object(output);
+
+    // Final safety check before serialization
+    match serde_json::to_string_pretty(&json_value) {
+        Ok(json_string) => {
+            tracing::debug!(
+                "Successfully serialized tree format with {} characters",
+                json_string.len()
+            );
+            Ok(json_string)
+        }
+        Err(e) => {
+            tracing::error!("Failed to serialize tree format: {}", e);
+            Err(CrawlerError::from(e))
         }
     }
 }
@@ -596,5 +842,34 @@ mod tests {
         assert!(!json.contains("metadata"));
         assert!(!json.contains("config_snapshot"));
         assert!(!json.contains("stats"));
+    }
+
+    #[test]
+    fn test_tree_format_serialization() {
+        let mut result =
+            CrawlResult::new("http://example.com".to_string(), &CrawlerConfig::default());
+
+        let parent_endpoint = ApiEndpoint::new("http://example.com/users".to_string(), 1)
+            .with_rel(Some("users".to_string()))
+            .with_parent(Some("http://example.com".to_string()));
+
+        let child_endpoint = ApiEndpoint::new("http://example.com/users/1".to_string(), 2)
+            .with_rel(Some("user".to_string()))
+            .with_parent(Some("http://example.com/users".to_string()));
+
+        result.endpoints.push(parent_endpoint);
+        result.endpoints.push(child_endpoint);
+
+        let config = OutputConfig {
+            format: OutputFormat::Tree,
+            include_stats: false,
+            include_config: false,
+            hierarchical: false,
+        };
+
+        let json = serialize_result(&result, &config).unwrap();
+        assert!(json.contains("api_tree"));
+        assert!(json.contains("children"));
+        assert!(json.contains("http://example.com/users"));
     }
 }

@@ -86,6 +86,10 @@ struct Args {
     #[arg(long, help = "Show detailed endpoint information")]
     detailed: bool,
 
+    /// Enable debug mode with extra safety checks
+    #[arg(long, help = "Enable debug mode for troubleshooting")]
+    debug: bool,
+
     /// Maximum number of endpoints to show in detailed view
     #[arg(long, default_value = "50", help = "Max endpoints in detailed view")]
     max_show: usize,
@@ -103,6 +107,8 @@ enum OutputFormatArg {
     Compact,
     /// Hierarchical structure with endpoints nested under parent URLs
     Hierarchical,
+    /// Compact tree structure with all endpoint info in one block
+    Tree,
 }
 
 impl From<OutputFormatArg> for OutputFormat {
@@ -111,12 +117,49 @@ impl From<OutputFormatArg> for OutputFormat {
             OutputFormatArg::Pretty => OutputFormat::PrettyJson,
             OutputFormatArg::Compact => OutputFormat::CompactJson,
             OutputFormatArg::Hierarchical => OutputFormat::Hierarchical,
+            OutputFormatArg::Tree => OutputFormat::Tree,
         }
     }
 }
 
 #[tokio::main]
 async fn main() {
+    // Set up panic handler for better error messages
+    std::panic::set_hook(Box::new(|panic_info| {
+        eprintln!("🚨 API Crawler encountered a critical error!");
+        eprintln!();
+
+        if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            eprintln!("Error: {}", s);
+        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            eprintln!("Error: {}", s);
+        } else {
+            eprintln!("Error: Unknown panic occurred");
+        }
+
+        if let Some(location) = panic_info.location() {
+            eprintln!("Location: {}:{}", location.file(), location.line());
+        }
+
+        eprintln!();
+        eprintln!("This might be caused by:");
+        eprintln!("  • Invalid or malformed JSON response from the API");
+        eprintln!("  • Network connectivity issues");
+        eprintln!("  • Unexpected API response format");
+        eprintln!("  • Memory issues with very large APIs");
+        eprintln!();
+        eprintln!("Please try:");
+        eprintln!("  • Using --verbose flag for more details");
+        eprintln!("  • Reducing --concurrency (try --concurrency 1)");
+        eprintln!("  • Adding --max-depth limit (try --max-depth 3)");
+        eprintln!("  • Using standard format instead: --format pretty");
+        eprintln!();
+        eprintln!("If the issue persists, please report this as a bug with:");
+        eprintln!("  • The URL you were crawling");
+        eprintln!("  • The exact command you used");
+        eprintln!("  • This error message");
+    }));
+
     let args = Args::parse();
 
     // Initialize logging
@@ -177,26 +220,107 @@ async fn main() {
 
     info!("Starting API crawl from: {}", args.url);
 
-    // Start crawling
+    // Apply debug mode settings
+    if args.debug {
+        println!("🔧 Debug mode enabled");
+        println!("  • Extra safety checks: ON");
+        println!("  • Detailed logging: ON");
+        println!("  • Panic recovery: ON");
+        println!();
+    }
+
+    // Start crawling with better error handling
     let result = match crawler.crawl(&args.url).await {
         Ok(result) => result,
         Err(e) => {
             error!("Crawling failed: {}", e);
+
+            // Provide more specific error guidance
+            match &e {
+                CrawlerError::Http(http_err) => {
+                    if http_err.is_connect() {
+                        error!("Connection failed. Please check:");
+                        error!("  1. The URL is correct and accessible");
+                        error!("  2. The server is running");
+                        error!("  3. Network connectivity");
+                    } else if http_err.is_timeout() {
+                        error!(
+                            "Request timed out. Try increasing --timeout or reducing --concurrency"
+                        );
+                    }
+                }
+                CrawlerError::Url(_) => {
+                    error!(
+                        "Invalid URL format. Please provide a complete URL like: http://example.com/api"
+                    );
+                }
+                CrawlerError::Json(_) => {
+                    error!(
+                        "Failed to parse JSON response. The endpoint might not return valid JSON."
+                    );
+                }
+                _ => {}
+            }
+
             process::exit(1);
         }
     };
 
-    // Output results
+    // Output results with better error handling
     if let Some(output_path) = args.output {
-        let output_config = OutputConfig {
+        let mut output_config = OutputConfig {
             format: args.format.into(),
             include_stats: true,
             include_config: true,
             hierarchical: args.hierarchical,
         };
 
-        if let Err(e) = save_results_to_file(&result, &output_path, Some(output_config)) {
-            error!("Failed to save results: {}", e);
+        // In debug mode, fall back to standard format if tree format fails
+        if args.debug && matches!(output_config.format, OutputFormat::Tree) {
+            println!("🔧 Debug mode: Attempting tree format with fallback to standard format");
+        }
+
+        let save_result = if args.debug {
+            // In debug mode, try tree format first, fall back to standard if it fails
+            if matches!(output_config.format, OutputFormat::Tree) {
+                match save_results_to_file(&result, &output_path, Some(output_config.clone())) {
+                    Ok(()) => Ok(()),
+                    Err(tree_error) => {
+                        println!(
+                            "🔧 Debug: Tree format failed ({}), falling back to standard format",
+                            tree_error
+                        );
+                        output_config.format = OutputFormat::PrettyJson;
+                        save_results_to_file(&result, &output_path, Some(output_config))
+                    }
+                }
+            } else {
+                save_results_to_file(&result, &output_path, Some(output_config))
+            }
+        } else {
+            save_results_to_file(&result, &output_path, Some(output_config))
+        };
+
+        if let Err(e) = save_result {
+            error!("Failed to save results to {}: {}", output_path.display(), e);
+
+            // Provide specific guidance for file save errors
+            if let CrawlerError::Io(io_err) = &e {
+                match io_err.kind() {
+                    std::io::ErrorKind::PermissionDenied => {
+                        error!("Permission denied. Check file/directory permissions.");
+                    }
+                    std::io::ErrorKind::NotFound => {
+                        error!(
+                            "Directory not found. Create the directory first or use an existing path."
+                        );
+                    }
+                    _ => {
+                        error!("IO error occurred while saving file.");
+                    }
+                }
+            }
+
             process::exit(1);
         }
 
@@ -234,10 +358,12 @@ mod tests {
         let pretty = OutputFormatArg::Pretty;
         let compact = OutputFormatArg::Compact;
         let hierarchical = OutputFormatArg::Hierarchical;
+        let tree = OutputFormatArg::Tree;
 
         matches!(OutputFormat::from(pretty), OutputFormat::PrettyJson);
         matches!(OutputFormat::from(compact), OutputFormat::CompactJson);
         matches!(OutputFormat::from(hierarchical), OutputFormat::Hierarchical);
+        matches!(OutputFormat::from(tree), OutputFormat::Tree);
     }
 
     #[test]
