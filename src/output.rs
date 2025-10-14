@@ -104,16 +104,17 @@ pub fn serialize_result(result: &CrawlResult, config: &OutputConfig) -> Result<S
 
 /// Serialize crawl results in hierarchical format
 fn serialize_hierarchical_result(result: &CrawlResult, config: &OutputConfig) -> Result<String> {
-    use serde_json::{Map, Value, json};
+    use indexmap::IndexMap;
+    use serde_json::{Value, json};
 
-    let mut hierarchical_structure = Map::new();
+    let mut hierarchical_structure = IndexMap::new();
 
     // Build hierarchical structure
     for endpoint in &result.endpoints {
         let parent_key = endpoint.parent_url.as_deref().unwrap_or(&result.start_url);
 
         // Create endpoint object - only include non-null/non-empty fields
-        let mut endpoint_obj = Map::new();
+        let mut endpoint_obj = IndexMap::new();
         endpoint_obj.insert("href".to_string(), Value::String(endpoint.href.clone()));
 
         // Only include optional fields if they have values
@@ -143,23 +144,23 @@ fn serialize_hierarchical_result(result: &CrawlResult, config: &OutputConfig) ->
             .or_insert_with(|| Value::Array(Vec::new()));
 
         if let Value::Array(children_array) = children {
-            children_array.push(Value::Object(endpoint_obj));
+            children_array.push(Value::Object(endpoint_obj.into_iter().collect()));
         }
     }
 
     // Build final output structure
-    let mut output = Map::new();
+    let mut output = IndexMap::new();
     output.insert(
         "start_url".to_string(),
         Value::String(result.start_url.clone()),
     );
     output.insert(
         "endpoint_hierarchy".to_string(),
-        Value::Object(hierarchical_structure),
+        Value::Object(hierarchical_structure.into_iter().collect()),
     );
 
     // Add summary information
-    let mut summary = Map::new();
+    let mut summary = IndexMap::new();
     summary.insert(
         "total_endpoints".to_string(),
         Value::Number(result.endpoints.len().into()),
@@ -172,7 +173,10 @@ fn serialize_hierarchical_result(result: &CrawlResult, config: &OutputConfig) ->
         "discovered_domains".to_string(),
         Value::Number(result.discovered_domains().len().into()),
     );
-    output.insert("summary".to_string(), Value::Object(summary));
+    output.insert(
+        "summary".to_string(),
+        Value::Object(summary.into_iter().collect()),
+    );
 
     if config.include_stats {
         output.insert("stats".to_string(), json!(result.stats));
@@ -195,11 +199,11 @@ fn serialize_hierarchical_result(result: &CrawlResult, config: &OutputConfig) ->
     }
 
     // Serialize based on format preference
-    let json_value = Value::Object(output);
+    let final_json = Value::Object(output.into_iter().collect());
     match config.format {
-        OutputFormat::CompactJson => serde_json::to_string(&json_value).map_err(CrawlerError::from),
+        OutputFormat::CompactJson => serde_json::to_string(&final_json).map_err(CrawlerError::from),
         OutputFormat::PrettyJson | OutputFormat::Hierarchical | OutputFormat::Tree => {
-            serde_json::to_string_pretty(&json_value).map_err(CrawlerError::from)
+            serde_json::to_string_pretty(&final_json).map_err(CrawlerError::from)
         }
     }
 }
@@ -207,23 +211,27 @@ fn serialize_hierarchical_result(result: &CrawlResult, config: &OutputConfig) ->
 /// Serialize crawl results in compact tree format
 fn serialize_tree_result(result: &CrawlResult, config: &OutputConfig) -> Result<String> {
     use crate::types::ApiEndpoint;
-    use serde_json::{Map, Value, json};
-    use std::collections::HashSet;
+    use indexmap::IndexMap;
+    use serde_json::{Value, json};
+    use std::collections::{HashMap, HashSet};
 
     // Safety check for empty results
     if result.endpoints.is_empty() {
-        let mut output = Map::new();
+        let mut output = IndexMap::new();
         output.insert(
             "start_url".to_string(),
             Value::String(result.start_url.clone()),
         );
-        output.insert("api_tree".to_string(), Value::Object(Map::new()));
+        output.insert("api_tree".to_string(), Value::Null);
 
-        let mut summary = Map::new();
+        let mut summary = IndexMap::new();
         summary.insert("total_endpoints".to_string(), Value::Number(0.into()));
         summary.insert("max_depth".to_string(), Value::Number(0.into()));
         summary.insert("discovered_domains".to_string(), Value::Number(0.into()));
-        output.insert("summary".to_string(), Value::Object(summary));
+        output.insert(
+            "summary".to_string(),
+            Value::Object(summary.into_iter().collect()),
+        );
 
         if config.include_stats {
             output.insert("stats".to_string(), json!(result.stats));
@@ -245,167 +253,249 @@ fn serialize_tree_result(result: &CrawlResult, config: &OutputConfig) -> Result<
             );
         }
 
-        let json_value = Value::Object(output);
+        let json_value = Value::Object(output.into_iter().collect());
         return serde_json::to_string_pretty(&json_value).map_err(CrawlerError::from);
     }
 
-    // Build tree structure with cycle detection
-    let mut final_tree = Map::new();
-
-    // Build a simple non-recursive node structure to avoid infinite nesting
-    fn build_simple_node(endpoint: &ApiEndpoint) -> Map<String, Value> {
-        let mut node = Map::new();
-        node.insert("href".to_string(), Value::String(endpoint.href.clone()));
-
-        if let Some(ref rel) = endpoint.rel {
-            node.insert("rel".to_string(), Value::String(rel.clone()));
+    // Deduplicate endpoints by href and keep the one with most metadata
+    let mut unique_endpoints: HashMap<String, ApiEndpoint> = HashMap::new();
+    for endpoint in &result.endpoints {
+        let existing = unique_endpoints.get(&endpoint.href);
+        match existing {
+            Some(existing_endpoint) => {
+                // Keep the endpoint with more metadata or the one that's not self-referential
+                if endpoint.metadata.len() > existing_endpoint.metadata.len()
+                    || (endpoint.rel.as_deref() != Some("self")
+                        && existing_endpoint.rel.as_deref() == Some("self"))
+                {
+                    unique_endpoints.insert(endpoint.href.clone(), endpoint.clone());
+                }
+            }
+            None => {
+                unique_endpoints.insert(endpoint.href.clone(), endpoint.clone());
+            }
         }
+    }
+
+    let endpoints: Vec<&ApiEndpoint> = unique_endpoints.values().collect();
+
+    // Build a clean tree node structure where parent info appears before children
+    fn build_tree_node(
+        endpoint: &ApiEndpoint,
+        all_endpoints: &[&ApiEndpoint],
+        processed: &mut HashSet<String>,
+    ) -> IndexMap<String, Value> {
+        let mut node = IndexMap::new();
+
+        // Extract name from URL (last path segment)
+        let name = endpoint
+            .href
+            .split('/')
+            .last()
+            .unwrap_or(&endpoint.href)
+            .to_string();
+
+        // Use rel from metadata if available, otherwise use the rel field
+        let rel = endpoint
+            .metadata
+            .get("rel")
+            .and_then(|v| v.as_str())
+            .or(endpoint.rel.as_deref())
+            .unwrap_or("unknown");
+
+        // Create endpoint info structure
+        let mut endpoint_info = IndexMap::new();
+        endpoint_info.insert("name".to_string(), Value::String(name));
+        endpoint_info.insert("url".to_string(), Value::String(endpoint.href.clone()));
+        endpoint_info.insert("rel".to_string(), Value::String(rel.to_string()));
+        endpoint_info.insert("depth".to_string(), Value::Number(endpoint.depth.into()));
+
+        // Add optional fields if present
         if let Some(ref method) = endpoint.method {
-            node.insert("method".to_string(), Value::String(method.clone()));
+            endpoint_info.insert("method".to_string(), Value::String(method.clone()));
         }
         if let Some(ref content_type) = endpoint.r#type {
-            node.insert("type".to_string(), Value::String(content_type.clone()));
+            endpoint_info.insert("type".to_string(), Value::String(content_type.clone()));
         }
         if let Some(ref title) = endpoint.title {
-            node.insert("title".to_string(), Value::String(title.clone()));
+            endpoint_info.insert("title".to_string(), Value::String(title.clone()));
         }
 
-        node.insert("depth".to_string(), Value::Number(endpoint.depth.into()));
+        // Put endpoint info first
+        node.insert(
+            "api".to_string(),
+            Value::Object(endpoint_info.into_iter().collect()),
+        );
 
-        if !endpoint.metadata.is_empty() {
-            node.insert("metadata".to_string(), json!(endpoint.metadata));
+        // Find and sort children
+        let mut children: Vec<&ApiEndpoint> = all_endpoints
+            .iter()
+            .filter(|e| {
+                e.parent_url.as_ref() == Some(&endpoint.href)
+                    && !processed.contains(&e.href)
+                    && e.href != endpoint.href // Avoid self-reference
+            })
+            .cloned()
+            .collect();
+
+        // Sort children by depth first, then alphabetically by name
+        children.sort_by(|a, b| {
+            a.depth.cmp(&b.depth).then_with(|| {
+                let name_a = a.href.split('/').last().unwrap_or("");
+                let name_b = b.href.split('/').last().unwrap_or("");
+                name_a.cmp(name_b)
+            })
+        });
+
+        // Add children after the parent endpoint info
+        if !children.is_empty() {
+            let mut child_nodes = Vec::new();
+            for child in children {
+                if !processed.contains(&child.href) {
+                    processed.insert(child.href.clone());
+                    let child_node = build_tree_node(child, all_endpoints, processed);
+                    child_nodes.push(Value::Object(child_node.into_iter().collect()));
+                }
+            }
+            if !child_nodes.is_empty() {
+                node.insert("children".to_string(), Value::Array(child_nodes));
+            }
         }
 
         node
     }
 
-    // Build tree structure level by level to avoid recursion issues
-    fn build_tree_level(
-        parent_url: &str,
-        all_endpoints: &[ApiEndpoint],
-        processed: &mut HashSet<String>,
-        current_depth: usize,
-        max_depth: usize,
-    ) -> Vec<Value> {
-        if current_depth >= max_depth {
-            return Vec::new();
-        }
+    // Find root endpoint - prioritize self-referential endpoints at start_url
+    let root_endpoint = endpoints
+        .iter()
+        .find(|e| {
+            let matches = e.href == result.start_url
+                && e.parent_url.as_ref() == Some(&result.start_url)
+                && e.rel.as_deref() == Some("self");
 
-        let mut children = Vec::new();
+            matches
+        })
+        .or_else(|| {
+            let found = endpoints.iter().find(|e| e.href == result.start_url);
 
-        for endpoint in all_endpoints {
-            // Skip if already processed
-            if processed.contains(&endpoint.href) {
-                continue;
-            }
+            found
+        })
+        .or_else(|| {
+            let found = endpoints.iter().find(|e| e.depth == 0);
 
-            // Check if this endpoint is a direct child of the parent
-            if let Some(endpoint_parent) = &endpoint.parent_url {
-                if endpoint_parent == parent_url && endpoint.depth == current_depth {
-                    processed.insert(endpoint.href.clone());
+            found
+        })
+        .or_else(|| endpoints.first())
+        .map(|e| (*e).clone());
 
-                    let mut node = build_simple_node(endpoint);
-
-                    // Get children for this node
-                    let grandchildren = build_tree_level(
-                        &endpoint.href,
-                        all_endpoints,
-                        processed,
-                        current_depth + 1,
-                        max_depth,
-                    );
-
-                    if !grandchildren.is_empty() {
-                        node.insert("children".to_string(), Value::Array(grandchildren));
-                    }
-
-                    children.push(Value::Object(node));
-                }
-            }
-        }
-
-        children
-    }
-
-    // Calculate reasonable max depth to prevent runaway recursion
-    let max_endpoint_depth = result.endpoints.iter().map(|e| e.depth).max().unwrap_or(0);
-    let max_depth = std::cmp::min(max_endpoint_depth + 10, 100); // Cap at reasonable limit
-
-    // Additional safety check for malformed data
-    if result.endpoints.len() > 10000 {
-        tracing::warn!(
-            "Large number of endpoints ({}), this may take a while",
-            result.endpoints.len()
-        );
-    }
-
-    // Create root node with its children using level-by-level approach
     let mut processed = HashSet::new();
-    let root_children = build_tree_level(
-        &result.start_url,
-        &result.endpoints,
-        &mut processed,
-        1,
-        max_depth,
-    );
 
-    if !root_children.is_empty() {
-        let mut root_node = Map::new();
-        root_node.insert("href".to_string(), Value::String(result.start_url.clone()));
-        root_node.insert("rel".to_string(), Value::String("root".to_string()));
-        root_node.insert("depth".to_string(), Value::Number(0.into()));
-        root_node.insert("children".to_string(), Value::Array(root_children));
-        final_tree.insert(result.start_url.clone(), Value::Object(root_node));
-    }
+    let api_tree = if let Some(root) = root_endpoint {
+        // Extract root endpoint info
+        let name = root
+            .href
+            .split('/')
+            .last()
+            .unwrap_or(&root.href)
+            .to_string();
+        let rel = root
+            .metadata
+            .get("rel")
+            .and_then(|v| v.as_str())
+            .or(root.rel.as_deref())
+            .unwrap_or("self");
 
-    // Add any orphaned endpoints that weren't processed
-    for endpoint in &result.endpoints {
-        if processed.contains(&endpoint.href) {
-            continue;
-        }
+        // Mark root as processed
+        processed.insert(root.href.clone());
 
-        // Check if this is truly an orphaned endpoint (no valid parent)
-        let has_valid_parent = endpoint.parent_url.as_ref().map_or(false, |parent| {
-            result.endpoints.iter().any(|e| &e.href == parent)
+        // Build children
+        let mut children: Vec<&ApiEndpoint> = endpoints
+            .iter()
+            .filter(|e| {
+                e.parent_url.as_ref() == Some(&root.href)
+                    && !processed.contains(&e.href)
+                    && e.href != root.href // Avoid self-reference
+            })
+            .cloned()
+            .collect();
+
+        // Sort children by depth first, then alphabetically by name
+        children.sort_by(|a, b| {
+            a.depth.cmp(&b.depth).then_with(|| {
+                let name_a = a.href.split('/').last().unwrap_or("");
+                let name_b = b.href.split('/').last().unwrap_or("");
+                name_a.cmp(name_b)
+            })
         });
 
-        if !has_valid_parent && !endpoint.href.is_empty() {
-            let node = build_simple_node(endpoint);
-            final_tree.insert(endpoint.href.clone(), Value::Object(node));
+        let mut child_nodes = Vec::new();
+        for child in children {
+            if !processed.contains(&child.href) {
+                processed.insert(child.href.clone());
+                let child_node = build_tree_node(child, &endpoints, &mut processed);
+                child_nodes.push(Value::Object(child_node.into_iter().collect()));
+            }
         }
-    }
+
+        // Build JSON structure manually to guarantee field order
+        use serde_json::Map;
+        let mut root_object = Map::new();
+
+        // Insert endpoint info FIRST
+        let mut endpoint_info = Map::new();
+        endpoint_info.insert("name".to_string(), Value::String(name));
+        endpoint_info.insert("url".to_string(), Value::String(root.href.clone()));
+        endpoint_info.insert("rel".to_string(), Value::String(rel.to_string()));
+        endpoint_info.insert("depth".to_string(), Value::Number(root.depth.into()));
+
+        if let Some(ref method) = root.method {
+            endpoint_info.insert("method".to_string(), Value::String(method.clone()));
+        }
+        if let Some(ref content_type) = root.r#type {
+            endpoint_info.insert("type".to_string(), Value::String(content_type.clone()));
+        }
+        if let Some(ref title) = root.title {
+            endpoint_info.insert("title".to_string(), Value::String(title.clone()));
+        }
+
+        root_object.insert("api".to_string(), Value::Object(endpoint_info));
+
+        // Insert children SECOND (only if not empty)
+        if !child_nodes.is_empty() {
+            root_object.insert("children".to_string(), Value::Array(child_nodes));
+        }
+
+        Value::Object(root_object)
+    } else {
+        Value::Null
+    };
 
     // Build final output structure
-    let mut output = Map::new();
+    let mut output = IndexMap::new();
     output.insert(
         "start_url".to_string(),
         Value::String(result.start_url.clone()),
     );
-    output.insert("api_tree".to_string(), Value::Object(final_tree));
+    output.insert("api_tree".to_string(), api_tree);
 
     // Add summary
-    let mut summary = Map::new();
+    let mut summary = IndexMap::new();
     summary.insert(
         "total_endpoints".to_string(),
-        Value::Number(result.endpoints.len().into()),
+        Value::Number(unique_endpoints.len().into()),
     );
     summary.insert(
         "max_depth".to_string(),
-        Value::Number(
-            result
-                .endpoints
-                .iter()
-                .map(|e| e.depth)
-                .max()
-                .unwrap_or(0)
-                .into(),
-        ),
+        Value::Number(endpoints.iter().map(|e| e.depth).max().unwrap_or(0).into()),
     );
     summary.insert(
         "discovered_domains".to_string(),
         Value::Number(result.discovered_domains().len().into()),
     );
-    output.insert("summary".to_string(), Value::Object(summary));
+    output.insert(
+        "summary".to_string(),
+        Value::Object(summary.into_iter().collect()),
+    );
 
     if config.include_stats {
         output.insert("stats".to_string(), json!(result.stats));
@@ -427,7 +517,7 @@ fn serialize_tree_result(result: &CrawlResult, config: &OutputConfig) -> Result<
         );
     }
 
-    let json_value = Value::Object(output);
+    let json_value = Value::Object(output.into_iter().collect());
 
     // Final safety check before serialization
     match serde_json::to_string_pretty(&json_value) {
@@ -849,6 +939,10 @@ mod tests {
         let mut result =
             CrawlResult::new("http://example.com".to_string(), &CrawlerConfig::default());
 
+        // Add a root endpoint
+        let root_endpoint = ApiEndpoint::new("http://example.com".to_string(), 0)
+            .with_rel(Some("self".to_string()));
+
         let parent_endpoint = ApiEndpoint::new("http://example.com/users".to_string(), 1)
             .with_rel(Some("users".to_string()))
             .with_parent(Some("http://example.com".to_string()));
@@ -857,6 +951,7 @@ mod tests {
             .with_rel(Some("user".to_string()))
             .with_parent(Some("http://example.com/users".to_string()));
 
+        result.endpoints.push(root_endpoint);
         result.endpoints.push(parent_endpoint);
         result.endpoints.push(child_endpoint);
 
@@ -869,7 +964,11 @@ mod tests {
 
         let json = serialize_result(&result, &config).unwrap();
         assert!(json.contains("api_tree"));
+        assert!(json.contains("api"));
         assert!(json.contains("children"));
         assert!(json.contains("http://example.com/users"));
+        assert!(json.contains("\"name\":"));
+        assert!(json.contains("\"url\":"));
+        assert!(json.contains("\"rel\":"));
     }
 }
