@@ -5,12 +5,39 @@ use crate::types::{ApiEndpoint, CrawlResult, CrawlerConfig, QueueItem};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, sleep};
 use tracing::{debug, error, info};
 use url::Url;
+
+/// A unique identifier for an endpoint to prevent duplicates
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EndpointKey {
+    href: String,
+    parent_url: Option<String>,
+    rel: Option<String>,
+}
+
+impl Hash for EndpointKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.href.hash(state);
+        self.parent_url.hash(state);
+        self.rel.hash(state);
+    }
+}
+
+impl EndpointKey {
+    fn from_endpoint(endpoint: &ApiEndpoint) -> Self {
+        Self {
+            href: endpoint.href.clone(),
+            parent_url: endpoint.parent_url.clone(),
+            rel: endpoint.rel.clone(),
+        }
+    }
+}
 
 /// The main API crawler
 pub struct ApiCrawler {
@@ -244,10 +271,13 @@ impl ApiCrawler {
         parent_item: &QueueItem,
         endpoints: &mut Vec<ApiEndpoint>,
     ) -> Result<()> {
+        // Use a HashSet to track endpoints we've already added to prevent duplicates
+        let mut seen_endpoints = HashSet::new();
+        let mut temp_endpoints = Vec::new();
         // Look for HAL (Hypertext Application Language) style links
         if let Some(Value::Object(links)) = obj.get("_links") {
             for (rel, link_data) in links {
-                self.extract_from_link_data(rel, link_data, parent_item, endpoints)?;
+                self.extract_from_link_data(rel, link_data, parent_item, &mut temp_endpoints)?;
             }
         }
 
@@ -256,7 +286,12 @@ impl ApiCrawler {
             match links_value {
                 Value::Object(links) => {
                     for (rel, link_data) in links {
-                        self.extract_from_link_data(rel, link_data, parent_item, endpoints)?;
+                        self.extract_from_link_data(
+                            rel,
+                            link_data,
+                            parent_item,
+                            &mut temp_endpoints,
+                        )?;
                     }
                 }
                 Value::Array(links_array) => {
@@ -266,7 +301,12 @@ impl ApiCrawler {
                                 .get("rel")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown");
-                            self.extract_from_link_data(rel, link_item, parent_item, endpoints)?;
+                            self.extract_from_link_data(
+                                rel,
+                                link_item,
+                                parent_item,
+                                &mut temp_endpoints,
+                            )?;
                         }
                     }
                 }
@@ -274,36 +314,40 @@ impl ApiCrawler {
             }
         }
 
-        // Look for direct href properties
+        // Look for direct href properties (but not if we're processing a links array item)
         if let Some(Value::String(href)) = obj.get("href") {
-            let rel = obj
-                .get("rel")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            // Skip if this object is likely from a links array we already processed
+            let is_links_item = obj.get("rel").is_some() && obj.len() <= 4; // typical link object has href, rel, and maybe 1-2 other fields
+            if !is_links_item {
+                let rel = obj
+                    .get("rel")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
 
-            let mut endpoint = ApiEndpoint::new(href.clone(), parent_item.depth + 1)
-                .with_rel(rel)
-                .with_parent(Some(parent_item.url.clone()));
+                let mut endpoint = ApiEndpoint::new(href.clone(), parent_item.depth + 1)
+                    .with_rel(rel)
+                    .with_parent(Some(parent_item.url.clone()));
 
-            // Set known ApiEndpoint fields if they exist in the object
-            if let Some(Value::String(method)) = obj.get("method") {
-                endpoint.method = Some(method.clone());
-            }
-            if let Some(Value::String(content_type)) = obj.get("type") {
-                endpoint.r#type = Some(content_type.clone());
-            }
-            if let Some(Value::String(title)) = obj.get("title") {
-                endpoint.title = Some(title.clone());
-            }
-
-            // Extract additional metadata, excluding known ApiEndpoint fields
-            for (key, value) in obj {
-                if !matches!(key.as_str(), "href" | "rel" | "method" | "type" | "title") {
-                    endpoint = endpoint.with_metadata(key.clone(), value.clone());
+                // Set known ApiEndpoint fields if they exist in the object
+                if let Some(Value::String(method)) = obj.get("method") {
+                    endpoint.method = Some(method.clone());
                 }
-            }
+                if let Some(Value::String(content_type)) = obj.get("type") {
+                    endpoint.r#type = Some(content_type.clone());
+                }
+                if let Some(Value::String(title)) = obj.get("title") {
+                    endpoint.title = Some(title.clone());
+                }
 
-            endpoints.push(endpoint);
+                // Extract additional metadata, excluding known ApiEndpoint fields
+                for (key, value) in obj {
+                    if !matches!(key.as_str(), "href" | "rel" | "method" | "type" | "title") {
+                        endpoint = endpoint.with_metadata(key.clone(), value.clone());
+                    }
+                }
+
+                temp_endpoints.push(endpoint);
+            }
         }
 
         // Look for URL patterns in other fields
@@ -315,26 +359,44 @@ impl ApiCrawler {
                             .with_parent(Some(parent_item.url.clone()))
                             .with_metadata(format!("source_field"), Value::String(key.clone()));
 
-                        endpoints.push(endpoint);
+                        temp_endpoints.push(endpoint);
                     }
                 }
             }
         }
 
-        // Recursively process nested objects and arrays
-        for value in obj.values() {
+        // Recursively process nested objects and arrays, but skip the links array to avoid duplicates
+        for (key, value) in obj {
+            if key == "links" {
+                continue; // We already processed this above
+            }
             match value {
                 Value::Object(nested_obj) => {
-                    self.extract_from_object(nested_obj, parent_item, endpoints)?;
+                    self.extract_from_object(nested_obj, parent_item, &mut temp_endpoints)?;
                 }
                 Value::Array(arr) => {
-                    for item in arr {
-                        if let Value::Object(nested_obj) = item {
-                            self.extract_from_object(nested_obj, parent_item, endpoints)?;
+                    // Skip processing arrays that are links arrays
+                    if key != "_links" {
+                        for item in arr {
+                            if let Value::Object(nested_obj) = item {
+                                self.extract_from_object(
+                                    nested_obj,
+                                    parent_item,
+                                    &mut temp_endpoints,
+                                )?;
+                            }
                         }
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Deduplicate and add to final endpoints list
+        for endpoint in temp_endpoints {
+            let key = EndpointKey::from_endpoint(&endpoint);
+            if seen_endpoints.insert(key) {
+                endpoints.push(endpoint);
             }
         }
 
@@ -535,5 +597,49 @@ mod tests {
             Some(&json!("custom_value"))
         );
         assert_eq!(endpoint.metadata.get("another_custom"), Some(&json!(42)));
+    }
+
+    #[test]
+    fn test_endpoint_deduplication() {
+        let crawler = ApiCrawler::new(CrawlerConfig::default()).unwrap();
+        let parent_item = QueueItem::new("http://example.com".to_string(), 0, None);
+        let mut endpoints = Vec::new();
+
+        // Test JSON that would create duplicates due to multiple extraction paths
+        let obj = json!({
+            "links": [
+                {"href": "http://example.com/test", "rel": "self"},
+                {"href": "http://example.com/next", "rel": "next"}
+            ],
+            "message": "test",
+            "status": 200
+        });
+
+        if let Value::Object(obj_map) = obj {
+            crawler
+                .extract_from_object(&obj_map, &parent_item, &mut endpoints)
+                .unwrap();
+
+            // Should only find 2 unique endpoints, not 4 (no duplicates from links array + recursive processing)
+            assert_eq!(endpoints.len(), 2);
+
+            // Verify we have the expected endpoints
+            let hrefs: HashSet<&String> = endpoints.iter().map(|e| &e.href).collect();
+            assert!(hrefs.contains(&"http://example.com/test".to_string()));
+            assert!(hrefs.contains(&"http://example.com/next".to_string()));
+
+            // Verify rels are correct
+            let self_endpoint = endpoints
+                .iter()
+                .find(|e| e.rel.as_deref() == Some("self"))
+                .unwrap();
+            assert_eq!(self_endpoint.href, "http://example.com/test");
+
+            let next_endpoint = endpoints
+                .iter()
+                .find(|e| e.rel.as_deref() == Some("next"))
+                .unwrap();
+            assert_eq!(next_endpoint.href, "http://example.com/next");
+        }
     }
 }
