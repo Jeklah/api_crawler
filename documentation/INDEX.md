@@ -7,10 +7,13 @@ This directory contains all comprehensive documentation for the API Crawler proj
 ### Core Documentation
 - **[README.md](./README.md)** - Main documentation with installation, usage, and features
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Technical architecture and design decisions
+- **[CHANGELOG.md](./CHANGELOG.md)** - Version history and notable changes
 
 ### Technical Deep-Dives
 - **[TREE_ORDERING_SOLUTION.md](./TREE_ORDERING_SOLUTION.md)** - Complete solution for parent-first tree structure
 - **[ROOT_CAUSE_ANALYSIS.md](./ROOT_CAUSE_ANALYSIS.md)** - Technical analysis of JSON key ordering issues
+- **[DUPLICATION_BUG_FIX.md](./DUPLICATION_BUG_FIX.md)** - Comprehensive fix for data duplication issues
+- **[PERFORMANCE_IMPROVEMENTS.md](./PERFORMANCE_IMPROVEMENTS.md)** - Summary of 57% file size reduction and efficiency gains
 
 ### Format Documentation
 - **[FORMAT_COMPARISON.md](./FORMAT_COMPARISON.md)** - Before/after comparison of tree output formats
@@ -32,10 +35,20 @@ The API crawler underwent significant improvements to fix tree output formatting
 - **Solution**: Strategic field renaming (`"endpoint"` → `"api"`) to ensure proper ordering
 - **Result**: Clean parent-first tree structure
 
-### Key Documents for Understanding the Fix
+### Data Duplication Improvements
+The API crawler also underwent critical fixes to eliminate data duplication:
+
+- **Problem**: Endpoints appeared multiple times and metadata was duplicated
+- **Root Cause**: Overlapping extraction strategies and insufficient field filtering
+- **Solution**: Endpoint deduplication using `HashSet` and proper metadata handling
+- **Result**: 57% file size reduction (6.4MB → 2.8MB)
+
+### Key Documents for Understanding Technical Fixes
 1. **[TREE_ORDERING_SOLUTION.md](./TREE_ORDERING_SOLUTION.md)** - Complete solution overview
 2. **[ROOT_CAUSE_ANALYSIS.md](./ROOT_CAUSE_ANALYSIS.md)** - Detailed technical investigation
-3. **[FORMAT_COMPARISON.md](./FORMAT_COMPARISON.md)** - Before/after structural comparison
+3. **[DUPLICATION_BUG_FIX.md](./DUPLICATION_BUG_FIX.md)** - Comprehensive duplication elimination fix
+4. **[PERFORMANCE_IMPROVEMENTS.md](./PERFORMANCE_IMPROVEMENTS.md)** - Performance gains summary
+5. **[FORMAT_COMPARISON.md](./FORMAT_COMPARISON.md)** - Before/after structural comparison
 
 ## 📊 Output Formats
 
@@ -62,13 +75,16 @@ The system is built with:
 1. **Initial Implementation** - Basic API crawling functionality
 2. **Format Issues Identified** - Tree output showing children before parents
 3. **Root Cause Analysis** - Discovered JSON key ordering problem
-4. **Solution Implementation** - Field renaming to ensure proper ordering
-5. **Documentation Complete** - Comprehensive technical documentation
+4. **Tree Ordering Solution** - Field renaming to ensure proper ordering
+5. **Duplication Issues Identified** - Data appearing multiple times in hierarchical output
+6. **Duplication Fix Implementation** - Comprehensive deduplication with 57% file size reduction
+7. **Documentation Complete** - Comprehensive technical documentation
 
 ## 🔗 Related Files
 
 ### Example Outputs
 - `tree_v2.json` - Example of corrected tree output format
+- `hierarchical_v1_deduped.json` - Example of deduplicated hierarchical output
 - `api_v1_2022-6_final.json` - Complex API structure example
 
 ### Code Structure

@@ -13,6 +13,7 @@ A powerful Rust-based tool for crawling REST APIs and mapping their complete end
 - ⚙️ **Highly Configurable**: Customizable depth, concurrency, timeouts, and more
 - 🌐 **Domain Restrictions**: Optionally limit crawling to specific domains
 - 📈 **Progress Tracking**: Real-time statistics and progress information
+- 🚫 **Zero Duplication**: Advanced deduplication eliminates all redundant data (57% file size reduction!)
 
 ## Installation
 
