@@ -285,9 +285,20 @@ impl ApiCrawler {
                 .with_rel(rel)
                 .with_parent(Some(parent_item.url.clone()));
 
-            // Extract additional metadata
+            // Set known ApiEndpoint fields if they exist in the object
+            if let Some(Value::String(method)) = obj.get("method") {
+                endpoint.method = Some(method.clone());
+            }
+            if let Some(Value::String(content_type)) = obj.get("type") {
+                endpoint.r#type = Some(content_type.clone());
+            }
+            if let Some(Value::String(title)) = obj.get("title") {
+                endpoint.title = Some(title.clone());
+            }
+
+            // Extract additional metadata, excluding known ApiEndpoint fields
             for (key, value) in obj {
-                if key != "href" && key != "rel" {
+                if !matches!(key.as_str(), "href" | "rel" | "method" | "type" | "title") {
                     endpoint = endpoint.with_metadata(key.clone(), value.clone());
                 }
             }
@@ -351,9 +362,20 @@ impl ApiCrawler {
                         .with_rel(Some(rel.to_string()))
                         .with_parent(Some(parent_item.url.clone()));
 
-                    // Extract additional link metadata
+                    // Set known ApiEndpoint fields if they exist in the link object
+                    if let Some(Value::String(method)) = link_obj.get("method") {
+                        endpoint.method = Some(method.clone());
+                    }
+                    if let Some(Value::String(content_type)) = link_obj.get("type") {
+                        endpoint.r#type = Some(content_type.clone());
+                    }
+                    if let Some(Value::String(title)) = link_obj.get("title") {
+                        endpoint.title = Some(title.clone());
+                    }
+
+                    // Extract additional link metadata, excluding known ApiEndpoint fields
                     for (key, value) in link_obj {
-                        if key != "href" {
+                        if !matches!(key.as_str(), "href" | "rel" | "method" | "type" | "title") {
                             endpoint = endpoint.with_metadata(key.clone(), value.clone());
                         }
                     }
@@ -468,5 +490,50 @@ mod tests {
             .find(|e| e.rel == Some("next".to_string()))
             .unwrap();
         assert!(next_endpoint.should_crawl());
+    }
+
+    #[test]
+    fn test_no_metadata_duplication() {
+        let crawler = ApiCrawler::new(CrawlerConfig::default()).unwrap();
+        let parent_item = QueueItem::new("http://example.com".to_string(), 0, None);
+        let mut endpoints = Vec::new();
+
+        // Test link object with rel, method, type, title, and custom metadata
+        let link_obj = json!({
+            "href": "http://example.com/test",
+            "rel": "test-rel",
+            "method": "POST",
+            "type": "application/json",
+            "title": "Test Endpoint",
+            "custom_field": "custom_value",
+            "another_custom": 42
+        });
+
+        crawler
+            .extract_from_link_data("test-rel", &link_obj, &parent_item, &mut endpoints)
+            .unwrap();
+
+        assert_eq!(endpoints.len(), 1);
+        let endpoint = &endpoints[0];
+
+        // Verify that known fields are set directly on the endpoint
+        assert_eq!(endpoint.rel, Some("test-rel".to_string()));
+        assert_eq!(endpoint.method, Some("POST".to_string()));
+        assert_eq!(endpoint.r#type, Some("application/json".to_string()));
+        assert_eq!(endpoint.title, Some("Test Endpoint".to_string()));
+
+        // Verify that known fields are NOT duplicated in metadata
+        assert!(!endpoint.metadata.contains_key("rel"));
+        assert!(!endpoint.metadata.contains_key("method"));
+        assert!(!endpoint.metadata.contains_key("type"));
+        assert!(!endpoint.metadata.contains_key("title"));
+        assert!(!endpoint.metadata.contains_key("href"));
+
+        // Verify that custom fields ARE in metadata
+        assert_eq!(
+            endpoint.metadata.get("custom_field"),
+            Some(&json!("custom_value"))
+        );
+        assert_eq!(endpoint.metadata.get("another_custom"), Some(&json!(42)));
     }
 }
